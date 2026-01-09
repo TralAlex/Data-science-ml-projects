@@ -1,0 +1,188 @@
+
+%matplotlib inline
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==============================================
+# 0) Generisanje sintetičkih 2D podataka (3 klastera)
+# ==============================================
+np.random.seed(42)
+n = 360
+n_per = n // 3
+
+centers = np.array([[-3.0, -3.0],
+                    [ 3.0,  3.0],
+                    [-3.0,  3.0]])
+covs = [np.diag([1.2, 1.0]), np.diag([1.1, 1.3]), np.diag([1.0, 1.1])]
+
+X_parts = [np.random.multivariate_normal(centers[i], covs[i], size=n_per) for i in range(3)]
+X = np.vstack(X_parts)
+
+# Dodaj malo outlier-a / šuma
+idx_noise = np.random.choice(X.shape[0], size=12, replace=False)
+X[idx_noise] += np.random.normal(0, 3.2, size=(12, 2))
+
+# Granice za plot
+x_min, x_max = X[:,0].min()-1.5, X[:,0].max()+1.5
+y_min, y_max = X[:,1].min()-1.5, X[:,1].max()+1.5
+
+# ==============================================
+# Helperi
+# ==============================================
+def inertia_np(X, labels, centers):
+    # suma kvadrata udaljenosti svake tačke od njenog centra
+    d2 = (X - centers[labels])**2
+    return np.sum(np.sum(d2, axis=1))
+
+def color_map():
+    # fino razlikovanje boja za <= 6 klastera
+    return ['tab:blue', 'tab:red', 'tab:green', 'tab:orange', 'tab:purple', 'tab:brown']
+
+# Mreža za decision boundary
+xx, yy = np.meshgrid(np.linspace(x_min, x_max, 350),
+                     np.linspace(y_min, y_max, 350))
+
+# ==============================================
+# Pokušaj import-a sklearn; ako nema, fallback
+# ==============================================
+use_sklearn = True
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+except Exception:
+    use_sklearn = False
+
+k = 3                   # broj klastera
+do_scale = True         # standardizacija radi stabilnosti
+
+# ==============================================
+# 1) Treniranje K-Means
+# ==============================================
+if use_sklearn:
+    if do_scale:
+        model = make_pipeline(StandardScaler(),
+                              KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42))
+        model.fit(X)
+        labels = model.predict(X)
+
+        # centri u originalnoj skali
+        scaler = model.named_steps['standardscaler']
+        kmeans = model.named_steps['kmeans']
+        centers_std = kmeans.cluster_centers_
+        centers = scaler.inverse_transform(centers_std)
+        inertia = inertia_np(X, labels, centers)
+    else:
+        kmeans = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+        kmeans.fit(X)
+        labels = kmeans.labels_
+        centers = kmeans.cluster_centers_
+        inertia = kmeans.inertia_
+
+    def predict_grid(grid):
+        # predikcija klastera na mreži
+        return model.predict(grid) if do_scale else kmeans.predict(grid)
+
+else:
+    # --------- Fallback: čista numpy implementacija K-Means sa k-means++ ---------
+    def standardize(X):
+        mu = X.mean(axis=0)
+        sigma = X.std(axis=0, ddof=0) + 1e-9
+        return (X - mu) / sigma, mu, sigma
+
+    X_std, mu, sigma = (standardize(X) if do_scale else (X.copy(), np.zeros(2), np.ones(2)))
+    rnd = np.random.RandomState(42)
+
+    # k-means++ inicijalizacija
+    centers_std = []
+    # prvi centar nasumično
+    centers_std.append(X_std[rnd.randint(0, X_std.shape[0])])
+    # preostali centri
+    for _ in range(1, k):
+        # udaljenosti do najbližeg već izabranog centra
+        d2 = np.min([np.sum((X_std - c)**2, axis=1) for c in centers_std], axis=0)
+        # verovatnoće proporcionalne d^2
+        probs = d2 / (d2.sum() + 1e-12)
+        idx = rnd.choice(X_std.shape[0], p=probs)
+        centers_std.append(X_std[idx])
+    centers_std = np.vstack(centers_std)
+
+    # Lloyd-ov algoritam
+    max_iter = 300
+    tol = 1e-4
+    labels = np.zeros(X_std.shape[0], dtype=int)
+
+    for it in range(max_iter):
+        # dodela klastera
+        dists = np.stack([np.sum((X_std - centers_std[j])**2, axis=1) for j in range(k)], axis=1)
+        new_labels = np.argmin(dists, axis=1)
+
+        # ažuriranje centara
+        new_centers = centers_std.copy()
+        for j in range(k):
+            mask = (new_labels == j)
+            if np.any(mask):
+                new_centers[j] = X_std[mask].mean(axis=0)
+            else:
+                # prazni klaster -> reinit
+                new_centers[j] = X_std[rnd.randint(0, X_std.shape[0])]
+
+        # provera konvergencije
+        shift = np.linalg.norm(new_centers - centers_std)
+        centers_std = new_centers
+        labels = new_labels
+        if shift < tol:
+            break
+
+    # konverzija centara u originalnu skalu (ako je bilo skaliranja)
+    centers = centers_std * sigma + mu
+    inertia = inertia_np(X, labels, centers)
+
+    def predict_grid(grid):
+        # predikcija na mreži: dodela najbližem centru
+        G_std = (grid - mu) / sigma if do_scale else grid
+        dists = np.stack([np.sum((G_std - centers_std[j])**2, axis=1) for j in range(k)], axis=1)
+        return np.argmin(dists, axis=1)
+
+# ==============================================
+# 2) Plot: tačke po klasterima + centri + decision boundary
+# ==============================================
+# Decision boundary preko mreže
+grid = np.c_[xx.ravel(), yy.ravel()]
+Z = predict_grid(grid).reshape(xx.shape)
+
+# Plot 1: decision boundary + tačke + centri
+fig, ax = plt.subplots(figsize=(9.2, 6.8))
+ax.contourf(xx, yy, Z, levels=np.arange(-0.5, k+0.5, 1.0), alpha=0.18, cmap='tab20')
+colors = color_map()
+for j in range(k):
+    ax.scatter(X[labels==j, 0], X[labels==j, 1], s=26, alpha=0.85, c=colors[j], label=f'Klaster {j}')
+# centri
+ax.scatter(centers[:,0], centers[:,1], s=160, c='black', marker='X', label='Centri')
+ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+ax.set_xlabel('X1'); ax.set_ylabel('X2')
+ax.set_title(f'K-Means (k={k}) — inertia={inertia:.2f}')
+ax.legend(loc='best'); ax.grid(alpha=0.2)
+plt.tight_layout()
+plt.savefig('kmeans_clusters_boundary.png', dpi=150)
+plt.show()
+
+# Plot 2: samo tačke po klasterima i centri (čist scatter)
+fig2, ax2 = plt.subplots(figsize=(9.0, 6.5))
+for j in range(k):
+    ax2.scatter(X[labels==j, 0], X[labels==j, 1], s=28, alpha=0.9, c=colors[j], label=f'Klaster {j}')
+ax2.scatter(centers[:,0], centers[:,1], s=160, c='black', marker='X', label='Centri')
+ax2.set_xlim(x_min, x_max); ax2.set_ylim(y_min, y_max)
+ax2.set_xlabel('X1'); ax2.set_ylabel('X2')
+ax2.set_title('K-Means klasteri i centri')
+ax2.legend(loc='best'); ax2.grid(alpha=0.2)
+plt.tight_layout()
+plt.savefig('kmeans_clusters_scatter.png', dpi=150)
+plt.show()
+
+# ==============================================
+# 3) Završne dve rečenice (tačno dve)
+# ==============================================
+print('Kreirali smo 2D sintetičke podatke, primenili K-Means sa k-means++ inicijalizacijom, i prikazali granice klastera i centre na grafiku.')
+print('Inertia meri ukupnu zbijenost unutar klastera; promena k ili skaliranja može vidno uticati na raspored i kvalitet klasterisanja.')

@@ -1,0 +1,252 @@
+
+%matplotlib inline
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==============================================
+# 0) Generisanje sintetičkih binarnih podataka (2D)
+# ==============================================
+np.random.seed(42)
+n = 300
+
+# Klasa 0
+mean0 = np.array([-2.0, -2.0])
+cov0 = np.diag([1.3, 1.0])
+X0 = np.random.multivariate_normal(mean0, cov0, size=n//2)
+y0 = np.zeros(n//2, dtype=int)
+
+# Klasa 1
+mean1 = np.array([ 2.2,  2.0])
+cov1 = np.diag([1.2, 1.4])
+X1 = np.random.multivariate_normal(mean1, cov1, size=n//2)
+y1 = np.ones(n//2, dtype=int)
+
+X = np.vstack([X0, X1])
+y = np.concatenate([y0, y1])
+
+# Dodaj malo outlier-a i šuma
+idx_noise = np.random.choice(n, size=10, replace=False)
+X[idx_noise] += np.random.normal(0, 2.8, size=(10, 2))
+
+# Granice za plot
+x_min, x_max = X[:,0].min()-1.5, X[:,0].max()+1.5
+y_min, y_max = X[:,1].min()-1.5, X[:,1].max()+1.5
+
+# ==============================================
+# Helper: metričke i crtanje granice
+# ==============================================
+def accuracy_np(y_true, y_pred):
+    return np.mean((y_pred.ravel() == y_true.ravel()).astype(float))
+
+# Mreža za decision boundary
+xx, yy = np.meshgrid(np.linspace(x_min, x_max, 300),
+                     np.linspace(y_min, y_max, 300))
+
+# ==============================================
+# Pokušaj import-a sklearn
+# ==============================================
+use_sklearn = True
+try:
+    from sklearn.tree import DecisionTreeClassifier, plot_tree
+except Exception:
+    use_sklearn = False
+
+max_depth = 4
+min_samples_leaf = 5
+criterion = 'gini'
+
+# ==============================================
+# 1) Treniranje stabla odlučivanja
+# ==============================================
+if use_sklearn:
+    tree = DecisionTreeClassifier(
+        max_depth=max_depth,
+        min_samples_leaf=min_samples_leaf,
+        criterion=criterion,
+        random_state=42
+    )
+    tree.fit(X, y)
+    y_pred = tree.predict(X)
+    acc = accuracy_np(y, y_pred)
+
+    # Decision boundary
+    grid = np.c_[xx.ravel(), yy.ravel()]
+    Z = tree.predict(grid).reshape(xx.shape)
+
+    # --- Plot 1: decision boundary ---
+    fig1, ax1 = plt.subplots(figsize=(8.8, 6.2))
+    ax1.contourf(xx, yy, Z, levels=[-0.5, 0.5, 1.5], alpha=0.25, cmap='RdBu')
+    ax1.scatter(X[y==0, 0], X[y==0, 1], s=28, alpha=0.9, c='tab:blue', label='Klasa 0')
+    ax1.scatter(X[y==1, 0], X[y==1, 1], s=28, alpha=0.9, c='tab:red',  label='Klasa 1')
+    ax1.set_xlim(x_min, x_max); ax1.set_ylim(y_min, y_max)
+    ax1.set_xlabel('X1'); ax1.set_ylabel('X2')
+    ax1.set_title(f"Stablo odlučivanja (max_depth={max_depth}, min_leaf={min_samples_leaf}) - acc={acc:.3f}")
+    ax1.legend(loc='best'); ax1.grid(alpha=0.2)
+    plt.tight_layout(); plt.savefig('decision_tree_boundary.png', dpi=150)
+
+    # --- Plot 2: dijagram stabla ---
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    plot_tree(tree,
+              feature_names=['X1', 'X2'],
+              class_names=['Klasa 0', 'Klasa 1'],
+              filled=True,
+              rounded=True,
+              impurity=True,
+              fontsize=9,
+              ax=ax2)
+    ax2.set_title('Struktura stabla odlučivanja (CART)')
+    plt.tight_layout(); plt.savefig('decision_tree_structure.png', dpi=150)
+
+else:
+    # --------- Fallback: jednostavna CART implementacija (Gini) ---------
+    class Node:
+        __slots__ = ['feature', 'thr', 'left', 'right', 'pred', 'depth', 'n0', 'n1']
+        def __init__(self, feature=None, thr=None, left=None, right=None, pred=None, depth=0, n0=0, n1=0):
+            self.feature = feature
+            self.thr = thr
+            self.left = left
+            self.right = right
+            self.pred = pred    # ako je list, pred = klasa (0/1)
+            self.depth = depth
+            self.n0 = n0
+            self.n1 = n1
+
+    def gini_impurity(y):
+        if len(y) == 0: return 0.0
+        p1 = np.mean(y == 1)
+        p0 = 1.0 - p1
+        return 1.0 - (p0*p0 + p1*p1)
+
+    def best_split(X, y, min_leaf):
+        n_samples, n_features = X.shape
+        best_feat, best_thr, best_imp = None, None, 1e9
+        parent_imp = gini_impurity(y)
+        if parent_imp == 0.0:
+            return None, None
+
+        for f in range(n_features):
+            idx = np.argsort(X[:, f])
+            Xf, yf = X[idx, f], y[idx]
+            for i in range(1, n_samples):
+                if Xf[i] == Xf[i-1]:
+                    continue
+                thr = 0.5 * (Xf[i] + Xf[i-1])
+                left_mask = X[:, f] <= thr
+                right_mask = ~left_mask
+                if left_mask.sum() < min_leaf or right_mask.sum() < min_leaf:
+                    continue
+                gl = gini_impurity(y[left_mask])
+                gr = gini_impurity(y[right_mask])
+                imp = (left_mask.sum()*gl + right_mask.sum()*gr) / n_samples
+                if imp < best_imp:
+                    best_imp = imp
+                    best_feat = f
+                    best_thr = thr
+        return best_feat, best_thr
+
+    def build_tree(X, y, depth=0, max_depth=4, min_leaf=5):
+        n0 = int(np.sum(y == 0)); n1 = int(np.sum(y == 1))
+        if depth >= max_depth or len(y) <= min_leaf or gini_impurity(y) == 0.0:
+            pred = int(np.round(np.mean(y)))
+            return Node(pred=pred, depth=depth, n0=n0, n1=n1)
+        feat, thr = best_split(X, y, min_leaf)
+        if feat is None:
+            pred = int(np.round(np.mean(y)))
+            return Node(pred=pred, depth=depth, n0=n0, n1=n1)
+        left_mask = X[:, feat] <= thr
+        right_mask = ~left_mask
+        left = build_tree(X[left_mask], y[left_mask], depth+1, max_depth, min_leaf)
+        right = build_tree(X[right_mask], y[right_mask], depth+1, max_depth, min_leaf)
+        node = Node(feature=feat, thr=thr, left=left, right=right, depth=depth, n0=n0, n1=n1)
+        return node
+
+    def predict_one(x, node):
+        while node.pred is None:
+            if x[node.feature] <= node.thr:
+                node = node.left
+            else:
+                node = node.right
+        return node.pred
+
+    def predict_fallback(Xq, root):
+        return np.array([predict_one(x, root) for x in Xq])
+
+    root = build_tree(X, y, depth=0, max_depth=max_depth, min_leaf=min_samples_leaf)
+    y_pred = predict_fallback(X, root)
+    acc = accuracy_np(y, y_pred)
+
+    # Decision boundary
+    grid = np.c_[xx.ravel(), yy.ravel()]
+    Z = predict_fallback(grid, root).reshape(xx.shape)
+
+    # --- Plot 1: decision boundary ---
+    fig1, ax1 = plt.subplots(figsize=(8.8, 6.2))
+    ax1.contourf(xx, yy, Z, levels=[-0.5, 0.5, 1.5], alpha=0.25, cmap='RdBu')
+    ax1.scatter(X[y==0, 0], X[y==0, 1], s=28, alpha=0.9, c='tab:blue', label='Klasa 0')
+    ax1.scatter(X[y==1, 0], X[y==1, 1], s=28, alpha=0.9, c='tab:red',  label='Klasa 1')
+    ax1.set_xlim(x_min, x_max); ax1.set_ylim(y_min, y_max)
+    ax1.set_xlabel('X1'); ax1.set_ylabel('X2')
+    ax1.set_title(f"Stablo odlučivanja (fallback) - acc={acc:.3f}")
+    ax1.legend(loc='best'); ax1.grid(alpha=0.2)
+    plt.tight_layout(); plt.savefig('decision_tree_boundary.png', dpi=150)
+
+    # --- Plot 2: nacrt stabla (ručno sa matplotlib-om) ---
+    # Izračun rasporeda čvorova: inorder x-pozicija, y po dubini
+    def compute_positions(node, x=0, y=0, positions=None, order=None):
+        if positions is None: positions = {}
+        if order is None: order = {'counter':0}
+        if node is None: return positions, order
+        if node.pred is None:
+            positions, order = compute_positions(node.left, x, y+1, positions, order)
+            x_pos = order['counter']; order['counter'] += 1
+            positions[node] = (x_pos, y)
+            positions, order = compute_positions(node.right, x, y+1, positions, order)
+        else:
+            x_pos = order['counter']; order['counter'] += 1
+            positions[node] = (x_pos, y)
+        return positions, order
+
+    positions, _ = compute_positions(root)
+
+    # Normalizuj koordinate i iscrtaj
+    xs = np.array([pos[0] for pos in positions.values()])
+    ys = np.array([pos[1] for pos in positions.values()])
+    if len(xs) == 0:
+        xs = np.array([0]); ys = np.array([0])
+    x_min_p, x_max_p = xs.min(), xs.max()
+    y_min_p, y_max_p = ys.min(), ys.max()
+    def norm(p):
+        x,y = p
+        xn = (x - x_min_p) / (x_max_p - x_min_p + 1e-9)
+        yn = (y - y_min_p) / (y_max_p - y_min_p + 1e-9)
+        return xn, yn
+
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+
+    # rekurzivno crtanje grana i čvorova
+    def draw_node(node):
+        (x, y) = norm(positions[node])
+        # bbox
+        box = plt.Rectangle((x-0.04, 1.0-y-0.04), 0.08, 0.08, fill=True, color='#eef2ff', ec='#4253b3')
+        ax2.add_patch(box)
+        if node.pred is None:
+            txt = f"X{node.feature+1} ≤ {node.thr:.2f}\\n(n0={node.n0}, n1={node.n1})"
+        else:
+            txt = f"Leaf: class={node.pred}\\n(n0={node.n0}, n1={node.n1})"
+        ax2.text(x, 1.0-y, txt, ha='center', va='center', fontsize=9)
+        # draw children
+        for child in [node.left, node.right]:
+            if child is not None:
+                (xc, yc) = norm(positions[child])
+                ax2.plot([x, xc], [1.0-y, 1.0-yc], color='#4253b3', lw=1.5)
+                draw_node(child)
+
+    draw_node(root)
+    ax2.set_xlim(-0.05, 1.05); ax2.set_ylim(-0.05, 1.05)
+    ax2.set_xticks([]); ax2.set_yticks([])
+    ax2.set_title('Struktura stabla odlučivanja (fallback)')
+    ax2.set_aspect('equal')
+    plt.tight_layout(); plt.savefig('decision_tree_structure.png', dpi=150)
+
+print('Sačuvani grafikoni: decision_tree_boundary.png i decision_tree_structure.png')

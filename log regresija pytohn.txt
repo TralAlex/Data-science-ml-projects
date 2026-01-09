@@ -1,0 +1,137 @@
+
+%matplotlib inline
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==============================================
+# 0) Generisanje sintetičkih binarnih podataka (2D)
+# ==============================================
+np.random.seed(42)
+n = 300
+
+# Klasa 0
+mean0 = np.array([-2.0, -2.0])
+cov0 = np.diag([1.2, 1.2])
+X0 = np.random.multivariate_normal(mean0, cov0, size=n//2)
+y0 = np.zeros(n//2, dtype=int)
+
+# Klasa 1
+mean1 = np.array([ 2.0,  2.0])
+cov1 = np.diag([1.2, 1.2])
+X1 = np.random.multivariate_normal(mean1, cov1, size=n//2)
+y1 = np.ones(n//2, dtype=int)
+
+X = np.vstack([X0, X1])
+y = np.concatenate([y0, y1])
+
+# Malo outlier-a i šuma
+idx_noise = np.random.choice(n, size=8, replace=False)
+X[idx_noise] += np.random.normal(0, 3.0, size=(8, 2))
+
+# ==============================================
+# Helper: sigmoid, metričke funkcije, crtanje granice
+# ==============================================
+def sigmoid(z): return 1.0 / (1.0 + np.exp(-z))
+
+def accuracy_np(y_true, y_pred):
+    return np.mean((y_pred.ravel() == y_true.ravel()).astype(float))
+
+def plot_decision_boundary(ax, w, b, color, label):
+    # w = [w1, w2], granica je: w1*x + w2*y + b = 0 -> y = -(w1/w2) * x - b/w2
+    if abs(w[1]) < 1e-8:
+        # gotovo vertikalna linija: x = -b/w1
+        x_line = -b / w[0]
+        ax.axvline(x_line, color=color, linewidth=2, label=label)
+    else:
+        x_vals = np.linspace(X[:,0].min()-1, X[:,0].max()+1, 200)
+        y_vals = -(w[0]/w[1])*x_vals - b/w[1]
+        ax.plot(x_vals, y_vals, color=color, linewidth=2, label=label)
+
+# ==============================================
+# Pokušaj import-a sklearn; ako nema, fallback
+# ==============================================
+use_sklearn = True
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+except Exception:
+    use_sklearn = False
+
+# ==============================================
+# 1) Treniranje logističke regresije
+# ==============================================
+if use_sklearn:
+    # Standardizacija + LogisticRegression (bez regularizacije efekat C=1.0 je ok)
+    model = make_pipeline(StandardScaler(), LogisticRegression(C=1.0, solver='lbfgs', max_iter=2000))
+    model.fit(X, y)
+
+    # Predikcije i metrika
+    y_pred = model.predict(X)
+    acc = accuracy_np(y, y_pred)
+
+    # Dobijanje koeficijenata u originalnoj skali (sa pipeline-om)
+    scaler = model.named_steps['standardscaler']
+    lr = model.named_steps['logisticregression']
+
+    w_scaled = lr.coef_[0]      # koeficijenti na skali StandardScaler-a
+    b_scaled = lr.intercept_[0] # intercept na skali StandardScaler-a
+
+    # Konverzija u originalnu skalu:
+    # z = (x - mean)/scale;  w_orig = w_scaled/scale; b_orig = b_scaled - sum(w_scaled*mean/scale)
+    w_orig = w_scaled / scaler.scale_
+    b_orig = b_scaled - np.sum(w_scaled * scaler.mean_ / scaler.scale_)
+
+else:
+    # Fallback: standardizacija + gradijentni spust (log-loss)
+    mean = X.mean(axis=0)
+    scale = X.std(axis=0, ddof=0)
+    X_std = (X - mean) / scale
+
+    # Inicijalizacija
+    w = np.zeros(2)
+    b = 0.0
+    lr_rate = 0.1
+    max_iter = 3000
+
+    for _ in range(max_iter):
+        z = X_std.dot(w) + b
+        p = sigmoid(z)
+        # Gradijenti
+        grad_w = X_std.T.dot(p - y) / n
+        grad_b = np.sum(p - y) / n
+        # Update
+        w -= lr_rate * grad_w
+        b -= lr_rate * grad_b
+
+    # Predikcija i metrika
+    y_pred = (sigmoid(X_std.dot(w) + b) >= 0.5).astype(int)
+    acc = accuracy_np(y, y_pred)
+
+    # Konverzija u originalnu skalu (obrnuto od standardizacije)
+    w_orig = w / scale
+    b_orig = b - np.sum(w * mean / scale)
+
+# ==============================================
+# 2) Plot: tačke po klasama + decision boundary
+# ==============================================
+fig, ax = plt.subplots(figsize=(8.5, 6))
+ax.scatter(X[y==0, 0], X[y==0, 1], s=30, alpha=0.8, c='tab:blue', label='Klasa 0')
+ax.scatter(X[y==1, 0], X[y==1, 1], s=30, alpha=0.8, c='tab:red', label='Klasa 1')
+
+plot_decision_boundary(ax, w_orig, b_orig, color='black', label=f'Logistička granica (acc={acc:.3f})')
+
+ax.set_title('Logistička regresija: podela podataka i decision boundary')
+ax.set_xlabel('X1')
+ax.set_ylabel('X2')
+ax.legend(loc='best')
+ax.grid(alpha=0.2)
+plt.tight_layout()
+plt.show()
+
+# ==============================================
+# 3) Završne dve rečenice (tačno dve)
+# ==============================================
+print('Kreirali smo sintetički skup sa dve klase, trenirali logističku regresiju i prikazali decision boundary na 2D grafiku.')
+print('Model deli prostor na dve regiona verovatnoće (p>=0.5 i p<0.5) i postiže dobru tačnost uprkos dodanim outlier-ima.')
